@@ -10,6 +10,18 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Camera = Workspace.CurrentCamera
 local LocalPlayer = Players.LocalPlayer
 
+-- Sound Effect
+local SOUND_ID = 9119144736
+
+local function PlaySound()
+    local sound = Instance.new("Sound")
+    sound.SoundId = "rbxassetid://" .. SOUND_ID
+    sound.Volume = 0.5
+    sound.Parent = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Head") or Camera
+    sound:Play()
+    game:GetService("Debris"):AddItem(sound, 2)
+end
+
 -- Control Variables: Movement
 local TargetWalkSpeed = 16
 local WalkSpeedEnabled = false
@@ -21,27 +33,8 @@ local BodyGyro = nil
 local NoclipEnabled = false
 local NoclipConnection = nil
 
--- Control Variables: Ghost Mode
-local GhostEnabled = false
-local GhostClone = nil
-local RealCharacter = nil
-local RealHRP = nil
-local PlayerModule = nil
-
-pcall(function()
-    PlayerModule = require(LocalPlayer.PlayerScripts:WaitForChild("PlayerModule"))
-end)
-
-local function ForceEnableControls()
-    if PlayerModule then
-        pcall(function()
-            local controls = PlayerModule:GetControls()
-            if controls then
-                controls:Enable()
-            end
-        end)
-    end
-end
+-- Control Variables: Teleport Save
+local SavedPosition = nil
 
 -- Control Variables: Combat
 local HitboxEnabled = false
@@ -196,111 +189,6 @@ local function ToggleNoclip(state)
     end
 end
 
--- [[ GHOST MODE FUNCTION - NOVA LÓGICA ]] --
-
-local function ToggleGhostMode(state)
-    local char = LocalPlayer.Character
-    if not char then return end
-
-    if state then
-        if GhostEnabled then return end
-        
-        RealCharacter = char
-        RealHRP = RealCharacter:FindFirstChild("HumanoidRootPart")
-        local realHumanoid = RealCharacter:FindFirstChildOfClass("Humanoid")
-        
-        if not RealHRP or not realHumanoid then return end
-
-        GhostEnabled = true
-
-        -- 1. CLONA O PERSONAGEM PRIMEIRO
-        RealCharacter.Archivable = true
-        GhostClone = RealCharacter:Clone()
-        RealCharacter.Archivable = false
-
-        -- 2. ANCORA APENAS O PERSONAGEM REAL
-        RealHRP.Anchored = true
-
-        -- 3. GARANTE QUE O CLONE ESTÁ 100% DESANCORADO
-        for _, part in ipairs(GhostClone:GetDescendants()) do
-            if part:IsA("BasePart") then
-                part.Anchored = false
-            end
-        end
-
-        GhostClone.Name = LocalPlayer.Name .. "_Ghost"
-        GhostClone.Parent = Workspace
-
-        -- Transparência opcional
-        for _, part in ipairs(GhostClone:GetDescendants()) do
-            if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then
-                part.Transparency = math.clamp(part.Transparency + 0.15, 0, 0.8)
-            end
-        end
-
-        -- 4. VINCULA A CÂMERA E CONTROLES AO CLONE
-        LocalPlayer.Character = GhostClone
-        
-        local cloneHumanoid = GhostClone:FindFirstChildOfClass("Humanoid")
-        if cloneHumanoid then
-            Camera.CameraSubject = cloneHumanoid
-        end
-
-        -- 5. FORÇA O RECARREGAMENTO DOS CONTROLES
-        task.defer(function()
-            ForceEnableControls()
-        end)
-
-        Fluent:Notify({
-            Title = "Zyro hub",
-            Content = "Ghost Mode Ativado!",
-            Duration = 2
-        })
-
-    else
-        if not GhostEnabled or not GhostClone then return end
-        GhostEnabled = false
-
-        -- Pega a posição final do clone
-        local cloneHRP = GhostClone:FindFirstChild("HumanoidRootPart")
-        local targetCFrame = cloneHRP and cloneHRP.CFrame or (RealHRP and RealHRP.CFrame)
-
-        -- Devolve o controle para o personagem real
-        if RealCharacter then
-            LocalPlayer.Character = RealCharacter
-            
-            -- Desancora e teletransporta
-            if RealHRP then
-                RealHRP.Anchored = false
-                if targetCFrame then
-                    RealHRP.CFrame = targetCFrame
-                end
-            end
-
-            -- Restaura a câmera
-            local realHumanoid = RealCharacter:FindFirstChildOfClass("Humanoid")
-            if realHumanoid then
-                Camera.CameraSubject = realHumanoid
-            end
-        end
-
-        -- Destroi o clone
-        GhostClone:Destroy()
-        GhostClone = nil
-
-        -- Reativa controles
-        task.defer(function()
-            ForceEnableControls()
-        end)
-
-        Fluent:Notify({
-            Title = "Zyro hub",
-            Content = "Ghost Mode Desativado!",
-            Duration = 2
-        })
-    end
-end
-
 -- [[ SILENT AIM FUNCTIONS ]] --
 
 local function getClosestEnemy()
@@ -326,13 +214,13 @@ local function getClosestEnemy()
     return closestPart
 end
 
--- [[ ESP LINE FUNCTION - CORRIGIDA ]] --
+-- [[ ESP LINE FUNCTION - DO PÉ PARA O PÉ ]] --
 
 local function CreateESPLine(player)
     if not ESPLineEnabled or not IsEnemy(player) or not IsPlayerValid(player) then return end
     
     local char = player.Character
-    if not char or not char:FindFirstChild("Head") then return end
+    if not char or not char:FindFirstChild("HumanoidRootPart") then return end
     
     if ESPLines[player] then return end
     
@@ -383,23 +271,31 @@ local function CreateESPLine(player)
             return
         end
         
-        local screenSize = Camera.ViewportSize
-        local screenCenter = Vector2.new(screenSize.X / 2, screenSize.Y / 2)
-        local headPos = lineData.Character:FindFirstChild("Head")
+        local myChar = LocalPlayer.Character
+        if not myChar or not myChar:FindFirstChild("HumanoidRootPart") then return end
         
-        if headPos then
-            local headScreenPos = Camera:WorldToViewportPoint(headPos.Position)
+        local myHRP = myChar:FindFirstChild("HumanoidRootPart")
+        local enemyHRP = lineData.Character:FindFirstChild("HumanoidRootPart")
+        
+        if myHRP and enemyHRP then
+            -- Ponto fixo: meu pé (HRP.Position)
+            local myFootScreen = Camera:WorldToViewportPoint(myHRP.Position)
             
-            -- Apenas desenha se a cabeça está à frente da câmera
-            if headScreenPos.Z > 0 then
-                local headScreen2D = Vector2.new(headScreenPos.X, headScreenPos.Y)
-                local distance = (screenCenter - headScreen2D).Magnitude
+            -- Ponto alvo: pé do inimigo (HRP.Position)
+            local enemyFootScreen = Camera:WorldToViewportPoint(enemyHRP.Position)
+            
+            -- Apenas desenha se o inimigo está à frente da câmera
+            if enemyFootScreen.Z > 0 then
+                local myFootScreen2D = Vector2.new(myFootScreen.X, myFootScreen.Y)
+                local enemyFootScreen2D = Vector2.new(enemyFootScreen.X, enemyFootScreen.Y)
+                
+                local distance = (myFootScreen2D - enemyFootScreen2D).Magnitude
                 
                 if distance > 0 then
-                    local angle = math.atan2(headScreen2D.Y - screenCenter.Y, headScreen2D.X - screenCenter.X)
+                    local angle = math.atan2(enemyFootScreen2D.Y - myFootScreen2D.Y, enemyFootScreen2D.X - myFootScreen2D.X)
                     
                     lineData.Line.Size = UDim2.new(0, distance, 0, 2)
-                    lineData.Line.Position = UDim2.new(0, screenCenter.X, 0, screenCenter.Y)
+                    lineData.Line.Position = UDim2.new(0, myFootScreen2D.X, 0, myFootScreen2D.Y)
                     lineData.Line.Rotation = math.deg(angle)
                     lineData.Line.AnchorPoint = Vector2.new(0, 0.5)
                 end
@@ -414,7 +310,12 @@ end
 
 Tabs.Main:AddParagraph({
     Title = "Movement Controls",
-    Content = "Hotkeys: F (Fly) | G (TP Up +40 studs) | Z (Ghost Mode) | X (Minimize UI)"
+    Content = "Hotkeys: F (Fly) | G (TP Up +40 studs) | X (Minimize UI)"
+})
+
+Tabs.Main:AddParagraph({
+    Title = "Position Save/Load",
+    Content = "Hotkeys: J (Save) | H (Teleport)"
 })
 
 local SpeedToggle = Tabs.Main:AddToggle("SpeedToggle", {
@@ -449,15 +350,6 @@ local NoclipToggle = Tabs.Main:AddToggle("NoclipToggle", {
 
 NoclipToggle:OnChanged(function(Value)
     ToggleNoclip(Value)
-end)
-
-local GhostToggle = Tabs.Main:AddToggle("GhostToggle", {
-    Title = "Enable Ghost Mode (Hotkey: Z)",
-    Default = false
-})
-
-GhostToggle:OnChanged(function(Value)
-    ToggleGhostMode(Value)
 end)
 
 local InfJumpToggle = Tabs.Main:AddToggle("InfJumpToggle", {
@@ -547,6 +439,59 @@ Tabs.Main:AddButton({
     Description = "Instant upward teleport (Hotkey: G)",
     Callback = function()
         TeleportUp()
+    end
+})
+
+local function SavePosition()
+    local char = LocalPlayer.Character
+    if not char or not char:FindFirstChild("HumanoidRootPart") then return end
+    
+    SavedPosition = char:FindFirstChild("HumanoidRootPart").CFrame
+    PlaySound()
+    
+    Fluent:Notify({
+        Title = "Zyro hub",
+        Content = "Posição salva!",
+        Duration = 2
+    })
+end
+
+local function TeleportToSaved()
+    if not SavedPosition then
+        Fluent:Notify({
+            Title = "Zyro hub",
+            Content = "Nenhuma posição salva!",
+            Duration = 2
+        })
+        return
+    end
+    
+    local char = LocalPlayer.Character
+    if not char or not char:FindFirstChild("HumanoidRootPart") then return end
+    
+    PlaySound()
+    char:FindFirstChild("HumanoidRootPart").CFrame = SavedPosition
+    
+    Fluent:Notify({
+        Title = "Zyro hub",
+        Content = "Teleportado para a posição salva!",
+        Duration = 2
+    })
+end
+
+Tabs.Main:AddButton({
+    Title = "Save Position (Hotkey: J)",
+    Description = "Salva sua posição atual",
+    Callback = function()
+        SavePosition()
+    end
+})
+
+Tabs.Main:AddButton({
+    Title = "Teleport to Saved (Hotkey: H)",
+    Description = "Vai para a posição salva",
+    Callback = function()
+        TeleportToSaved()
     end
 })
 
@@ -684,6 +629,7 @@ local function TeleportToNearestPlayer()
     end
 
     if closestPlayer then
+        PlaySound()
         myHrp.CFrame = closestPlayer.CFrame * CFrame.new(0, 0, 3)
         Fluent:Notify({ Title = "Zyro hub", Content = "Teleported!", Duration = 2 })
     else
@@ -705,7 +651,6 @@ Tabs.Under:AddParagraph({
     Content = "Hotkey: R"
 })
 
-
 local UnderToggle
 
 local function ToggleUnderplayer(state)
@@ -720,6 +665,7 @@ local function ToggleUnderplayer(state)
             HitboxToggle:SetValue(false)
         end
 
+        PlaySound()
         SurfacePosition = hrp.CFrame
         hrp.CFrame = SurfacePosition * CFrame.new(0, -7, 0)
         hrp.Anchored = true
@@ -727,6 +673,7 @@ local function ToggleUnderplayer(state)
         Fluent:Notify({ Title = "Zyro hub", Content = "Underplayer Ativado!", Duration = 2 })
     else
         if SurfacePosition then
+            PlaySound()
             hrp.CFrame = SurfacePosition
             SurfacePosition = nil
         end
@@ -766,7 +713,8 @@ RunService.RenderStepped:Connect(function()
     end
 
     -- Fly
-    if FlyEnabled and LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
+    
+if FlyEnabled and LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
         local hrp = LocalPlayer.Character.HumanoidRootPart
         local camera = Workspace.CurrentCamera
         local moveDir = Vector3.new()
@@ -892,8 +840,10 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
         UnderToggle:SetValue(not UnderplayerEnabled)
     elseif input.KeyCode == Enum.KeyCode.G then
         TeleportUp()
-    elseif input.KeyCode == Enum.KeyCode.Z then
-        GhostToggle:SetValue(not GhostEnabled)
+    elseif input.KeyCode == Enum.KeyCode.J then
+        SavePosition()
+    elseif input.KeyCode == Enum.KeyCode.H then
+        TeleportToSaved()
     end
 end)
 
