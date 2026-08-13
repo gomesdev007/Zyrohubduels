@@ -26,6 +26,22 @@ local GhostEnabled = false
 local GhostClone = nil
 local RealCharacter = nil
 local RealHRP = nil
+local PlayerModule = nil
+
+pcall(function()
+    PlayerModule = require(LocalPlayer.PlayerScripts:WaitForChild("PlayerModule"))
+end)
+
+local function ForceEnableControls()
+    if PlayerModule then
+        pcall(function()
+            local controls = PlayerModule:GetControls()
+            if controls then
+                controls:Enable()
+            end
+        end)
+    end
+end
 
 -- Control Variables: Combat
 local HitboxEnabled = false
@@ -41,7 +57,6 @@ local ESPLines = {}
 -- Control Variables: Underplayer
 local UnderplayerEnabled = false
 local SurfacePosition = nil
-local VisualClones = {}
 
 -- Esperar pelo ShootRemote
 pcall(function()
@@ -63,8 +78,7 @@ local Window = Fluent:CreateWindow({
 local Tabs = {
     Main = Window:AddTab({ Title = "Movement", Icon = "plane" }),
     Combat = Window:AddTab({ Title = "Combat / TP", Icon = "crosshair" }),
-    Under = Window:AddTab({ Title = "Underplayer", Icon = "shield" }),
-    Settings = Window:AddTab({ Title = "Settings", Icon = "settings" })
+    Under = Window:AddTab({ Title = "Underplayer", Icon = "shield" })
 }
 
 -- [[ HELPER FUNCTIONS ]] --
@@ -77,38 +91,26 @@ local function IsEnemy(player)
     return true
 end
 
+local function IsPlayerValid(player)
+    if not player or not player.Character then return false end
+    local char = player.Character
+    local humanoid = char:FindFirstChildOfClass("Humanoid")
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    local head = char:FindFirstChild("Head")
+    
+    if not humanoid or not hrp or not head then return false end
+    if humanoid.Health <= 0 then return false end
+    
+    return true
+end
+
 local function ResetPlayerHitbox(player)
     if player and player.Character then
         local char = player.Character
         local hrp = char:FindFirstChild("HumanoidRootPart")
         if hrp then
             hrp.Size = Vector3.new(2, 2, 1)
-            hrp.Transparency = 1
             hrp.CanCollide = true
-            hrp.Material = Enum.Material.Plastic
-
-            local lowerTorso = char:FindFirstChild("LowerTorso") or char:FindFirstChild("Torso")
-            if lowerTorso then
-                local rootJoint = hrp:FindFirstChild("RootJoint") or lowerTorso:FindFirstChild("RootJoint")
-                if rootJoint then
-                    rootJoint.C0 = CFrame.new(0, 0, 0) * CFrame.Angles(-math.rad(90), 0, math.rad(180))
-                end
-            end
-        end
-    end
-end
-
-local function CleanClones()
-    for _, clone in pairs(VisualClones) do
-        if clone and clone.Parent then
-            clone:Destroy()
-        end
-    end
-    VisualClones = {}
-
-    for _, item in pairs(Workspace:GetChildren()) do
-        if item.Name:sub(1, 11) == "UnderClone_" then
-            item:Destroy()
         end
     end
 end
@@ -194,7 +196,7 @@ local function ToggleNoclip(state)
     end
 end
 
--- [[ GHOST MODE FUNCTION ]] --
+-- [[ GHOST MODE FUNCTION - NOVA LÓGICA ]] --
 
 local function ToggleGhostMode(state)
     local char = LocalPlayer.Character
@@ -202,34 +204,52 @@ local function ToggleGhostMode(state)
 
     if state then
         if GhostEnabled then return end
+        
+        RealCharacter = char
+        RealHRP = RealCharacter:FindFirstChild("HumanoidRootPart")
+        local realHumanoid = RealCharacter:FindFirstChildOfClass("Humanoid")
+        
+        if not RealHRP or not realHumanoid then return end
+
         GhostEnabled = true
 
-        RealCharacter = char
-        RealHRP = char:FindFirstChild("HumanoidRootPart")
-        
-        if not RealHRP then return end
-
-        RealHRP.Anchored = true
-
+        -- 1. CLONA O PERSONAGEM PRIMEIRO
         RealCharacter.Archivable = true
         GhostClone = RealCharacter:Clone()
         RealCharacter.Archivable = false
 
-        GhostClone.Name = LocalPlayer.Name .. "_Ghost"
-        GhostClone.Parent = Workspace
+        -- 2. ANCORA APENAS O PERSONAGEM REAL
+        RealHRP.Anchored = true
 
+        -- 3. GARANTE QUE O CLONE ESTÁ 100% DESANCORADO
         for _, part in ipairs(GhostClone:GetDescendants()) do
-            if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then
-                part.Transparency = math.clamp(part.Transparency + 0.2, 0, 0.8)
+            if part:IsA("BasePart") then
+                part.Anchored = false
             end
         end
 
+        GhostClone.Name = LocalPlayer.Name .. "_Ghost"
+        GhostClone.Parent = Workspace
+
+        -- Transparência opcional
+        for _, part in ipairs(GhostClone:GetDescendants()) do
+            if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then
+                part.Transparency = math.clamp(part.Transparency + 0.15, 0, 0.8)
+            end
+        end
+
+        -- 4. VINCULA A CÂMERA E CONTROLES AO CLONE
         LocalPlayer.Character = GhostClone
         
         local cloneHumanoid = GhostClone:FindFirstChildOfClass("Humanoid")
         if cloneHumanoid then
             Camera.CameraSubject = cloneHumanoid
         end
+
+        -- 5. FORÇA O RECARREGAMENTO DOS CONTROLES
+        task.defer(function()
+            ForceEnableControls()
+        end)
 
         Fluent:Notify({
             Title = "Zyro hub",
@@ -241,23 +261,37 @@ local function ToggleGhostMode(state)
         if not GhostEnabled or not GhostClone then return end
         GhostEnabled = false
 
+        -- Pega a posição final do clone
         local cloneHRP = GhostClone:FindFirstChild("HumanoidRootPart")
-        local targetCFrame = cloneHRP and cloneHRP.CFrame or RealHRP.CFrame
+        local targetCFrame = cloneHRP and cloneHRP.CFrame or (RealHRP and RealHRP.CFrame)
 
+        -- Devolve o controle para o personagem real
+        if RealCharacter then
+            LocalPlayer.Character = RealCharacter
+            
+            -- Desancora e teletransporta
+            if RealHRP then
+                RealHRP.Anchored = false
+                if targetCFrame then
+                    RealHRP.CFrame = targetCFrame
+                end
+            end
+
+            -- Restaura a câmera
+            local realHumanoid = RealCharacter:FindFirstChildOfClass("Humanoid")
+            if realHumanoid then
+                Camera.CameraSubject = realHumanoid
+            end
+        end
+
+        -- Destroi o clone
         GhostClone:Destroy()
         GhostClone = nil
 
-        LocalPlayer.Character = RealCharacter
-
-        if RealHRP then
-            RealHRP.Anchored = false
-            RealHRP.CFrame = targetCFrame
-        end
-
-        local realHumanoid = RealCharacter:FindFirstChildOfClass("Humanoid")
-        if realHumanoid then
-            Camera.CameraSubject = realHumanoid
-        end
+        -- Reativa controles
+        task.defer(function()
+            ForceEnableControls()
+        end)
 
         Fluent:Notify({
             Title = "Zyro hub",
@@ -275,17 +309,16 @@ local function getClosestEnemy()
     local center = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
 
     for _, player in pairs(Players:GetPlayers()) do
-        if IsEnemy(player) then
+        if IsEnemy(player) and IsPlayerValid(player) then
             local char = player.Character
-            if char and char:FindFirstChild("Head") and char:FindFirstChild("Humanoid") and char.Humanoid.Health > 0 then
-                local screenPos = Camera:WorldToViewportPoint(char.Head.Position)
-                local distFromCenter = (Vector2.new(screenPos.X, screenPos.Y) - center).Magnitude
-                
-                if distFromCenter <= FOV_RADIUS then
-                    if distFromCenter < shortestDistance then
-                        shortestDistance = distFromCenter
-                        closestPart = char.Head
-                    end
+            local head = char:FindFirstChild("Head")
+            local screenPos = Camera:WorldToViewportPoint(head.Position)
+            local distFromCenter = (Vector2.new(screenPos.X, screenPos.Y) - center).Magnitude
+            
+            if distFromCenter <= FOV_RADIUS then
+                if distFromCenter < shortestDistance then
+                    shortestDistance = distFromCenter
+                    closestPart = head
                 end
             end
         end
@@ -293,10 +326,10 @@ local function getClosestEnemy()
     return closestPart
 end
 
--- [[ ESP LINE FUNCTION ]] --
+-- [[ ESP LINE FUNCTION - CORRIGIDA ]] --
 
 local function CreateESPLine(player)
-    if not ESPLineEnabled or not IsEnemy(player) then return end
+    if not ESPLineEnabled or not IsEnemy(player) or not IsPlayerValid(player) then return end
     
     local char = player.Character
     if not char or not char:FindFirstChild("Head") then return end
@@ -339,7 +372,7 @@ local function CreateESPLine(player)
             return
         end
         
-        if not lineData.Character or not lineData.Character:FindFirstChild("Head") or not LocalPlayer.Character or not LocalPlayer.Character:FindFirstChild("Head") then
+        if not lineData.Character or not IsPlayerValid(player) then
             if lineData.Line and lineData.Line.Parent then 
                 lineData.Line:Destroy() 
             end
@@ -356,16 +389,20 @@ local function CreateESPLine(player)
         
         if headPos then
             local headScreenPos = Camera:WorldToViewportPoint(headPos.Position)
-            local headScreen2D = Vector2.new(headScreenPos.X, headScreenPos.Y)
             
-            local distance = (screenCenter - headScreen2D).Magnitude
-            if distance > 0 then
-                local angle = math.atan2(headScreen2D.Y - screenCenter.Y, headScreen2D.X - screenCenter.X)
+            -- Apenas desenha se a cabeça está à frente da câmera
+            if headScreenPos.Z > 0 then
+                local headScreen2D = Vector2.new(headScreenPos.X, headScreenPos.Y)
+                local distance = (screenCenter - headScreen2D).Magnitude
                 
-                lineData.Line.Size = UDim2.new(0, distance, 0, 2)
-                lineData.Line.Position = UDim2.new(0, screenCenter.X, 0, screenCenter.Y)
-                lineData.Line.Rotation = math.deg(angle)
-                lineData.Line.AnchorPoint = Vector2.new(0, 0.5)
+                if distance > 0 then
+                    local angle = math.atan2(headScreen2D.Y - screenCenter.Y, headScreen2D.X - screenCenter.X)
+                    
+                    lineData.Line.Size = UDim2.new(0, distance, 0, 2)
+                    lineData.Line.Position = UDim2.new(0, screenCenter.X, 0, screenCenter.Y)
+                    lineData.Line.Rotation = math.deg(angle)
+                    lineData.Line.AnchorPoint = Vector2.new(0, 0.5)
+                end
             end
         end
     end
@@ -530,7 +567,7 @@ SilentAimToggle:OnChanged(function(Value)
     if Value then
         Fluent:Notify({
             Title = "Zyro hub",
-            Content = "Silent Aim Ativado! Clique para disparar.",
+            Content = "Silent Aim Ativado!",
             Duration = 2
         })
     else
@@ -576,7 +613,7 @@ ESPLineToggle:OnChanged(function(Value)
     else
         Fluent:Notify({
             Title = "Zyro hub",
-            Content = "ESP Line Ativado! Linhas até a cabeça dos inimigos.",
+            Content = "ESP Line Ativado!",
             Duration = 2
         })
     end
@@ -634,28 +671,23 @@ local function TeleportToNearestPlayer()
     local shortestDistance = math.huge
 
     for _, player in pairs(Players:GetPlayers()) do
-        if IsEnemy(player) then
+        if IsEnemy(player) and IsPlayerValid(player) then
             local char = player.Character
-            if char and char:IsDescendantOf(Workspace) then
-                local humanoid = char:FindFirstChildOfClass("Humanoid")
-                local hrp = char:FindFirstChild("HumanoidRootPart")
-
-                if humanoid and humanoid.Health > 0 and hrp then
-                    local distance = (myHrp.Position - hrp.Position).Magnitude
-                    if distance < shortestDistance then
-                        shortestDistance = distance
-                        closestPlayer = hrp
-                    end
-                end
+            local hrp = char:FindFirstChild("HumanoidRootPart")
+            local distance = (myHrp.Position - hrp.Position).Magnitude
+            
+            if distance < shortestDistance then
+                shortestDistance = distance
+                closestPlayer = hrp
             end
         end
     end
 
     if closestPlayer then
         myHrp.CFrame = closestPlayer.CFrame * CFrame.new(0, 0, 3)
-        Fluent:Notify({ Title = "Zyro hub", Content = "Teleported to nearest enemy!", Duration = 2 })
+        Fluent:Notify({ Title = "Zyro hub", Content = "Teleported!", Duration = 2 })
     else
-        Fluent:Notify({ Title = "Zyro hub", Content = "No valid enemy found.", Duration = 3 })
+        Fluent:Notify({ Title = "Zyro hub", Content = "No enemy found.", Duration = 2 })
     end
 end
 
@@ -670,8 +702,9 @@ Tabs.Combat:AddButton({
 
 Tabs.Under:AddParagraph({
     Title = "Underplayer Mode",
-    Content = "Hotkey: R (Entra -7 studs debaixo da terra, congela e coloca hitbox 20 no pé dos inimigos. Pressionar R novamente desativa e restaura tudo)."
+    Content = "Hotkey: R"
 })
+
 
 local UnderToggle
 
@@ -691,7 +724,7 @@ local function ToggleUnderplayer(state)
         hrp.CFrame = SurfacePosition * CFrame.new(0, -7, 0)
         hrp.Anchored = true
 
-        Fluent:Notify({ Title = "Zyro hub", Content = "Underplayer Ativado (-7 studs).", Duration = 2 })
+        Fluent:Notify({ Title = "Zyro hub", Content = "Underplayer Ativado!", Duration = 2 })
     else
         if SurfacePosition then
             hrp.CFrame = SurfacePosition
@@ -700,15 +733,13 @@ local function ToggleUnderplayer(state)
 
         hrp.Anchored = false
 
-        CleanClones()
-
         for _, player in pairs(Players:GetPlayers()) do
             if player ~= LocalPlayer then
                 ResetPlayerHitbox(player)
             end
         end
 
-        Fluent:Notify({ Title = "Zyro hub", Content = "Underplayer Desativado! Tudo restaurado.", Duration = 2 })
+        Fluent:Notify({ Title = "Zyro hub", Content = "Underplayer Desativado!", Duration = 2 })
     end
 end
 
@@ -723,60 +754,18 @@ UnderToggle:OnChanged(function(Value)
     end
 end)
 
--- [[ SETTINGS TAB ]] --
+-- [[ MAIN LOOP - OTIMIZADO ]] --
 
-local ThemeDropdown = Tabs.Settings:AddDropdown("ThemeManager", {
-    Title = "Interface Theme",
-    Values = {"Light", "Dark", "Darker", "Aqua", "Amethyst"},
-    Multi = false,
-    Default = "Light",
-})
-
-ThemeDropdown:OnChanged(function(Value)
-    Fluent:SetTheme(Value)
-end)
-
--- [[ RESPAWN & CHARACTER MANAGEMENT ]] --
-
-local function BindCharacterEvents(player)
-    player.CharacterAdded:Connect(function(char)
-        char:WaitForChild("Humanoid")
-        char:WaitForChild("HumanoidRootPart")
-
-        task.wait(0.5)
-
-        if player == LocalPlayer then
-            if FlyEnabled then
-                ToggleFly(true)
-            end
-        else
-            if ESPEnabled then
-                ApplyHighlight(player)
-            end
-            if ESPLineEnabled then
-                CreateESPLine(player)
-            end
-        end
-    end)
-end
-
-for _, player in pairs(Players:GetPlayers()) do
-    BindCharacterEvents(player)
-end
-
-Players.PlayerAdded:Connect(function(player)
-    BindCharacterEvents(player)
-end)
-
--- [[ LOOPS AND CONNECTIONS ]] --
+local lastESPUpdate = tick()
+local lastHitboxUpdate = tick()
 
 RunService.RenderStepped:Connect(function()
-    -- Aplicar WalkSpeed personalizado
+    -- WalkSpeed
     if WalkSpeedEnabled and LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid") then
         LocalPlayer.Character:FindFirstChildOfClass("Humanoid").WalkSpeed = TargetWalkSpeed
     end
 
-    -- Loop do Fly
+    -- Fly
     if FlyEnabled and LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
         local hrp = LocalPlayer.Character.HumanoidRootPart
         local camera = Workspace.CurrentCamera
@@ -795,21 +784,22 @@ RunService.RenderStepped:Connect(function()
         end
     end
 
-    -- Loop do ESP
-    if ESPEnabled then
-        for _, player in pairs(Players:GetPlayers()) do
-            if IsEnemy(player) and player.Character then
-                ApplyHighlight(player)
-            else
-                RemoveHighlight(player)
+    -- ESP (update a cada 0.1s)
+    if tick() - lastESPUpdate > 0.1 then
+        if ESPEnabled then
+            for _, player in pairs(Players:GetPlayers()) do
+                if IsEnemy(player) and player.Character then
+                    ApplyHighlight(player)
+                end
             end
         end
+        lastESPUpdate = tick()
     end
 
-    -- Loop de ESP Line
+    -- ESP Line
     if ESPLineEnabled then
         for _, player in pairs(Players:GetPlayers()) do
-            if IsEnemy(player) and player.Character then
+            if IsEnemy(player) and IsPlayerValid(player) then
                 if not ESPLines[player] then
                     CreateESPLine(player)
                 end
@@ -817,14 +807,14 @@ RunService.RenderStepped:Connect(function()
         end
     end
 
-    -- Loop de Hitbox Padrão (só roda se Underplayer estiver DESATIVADO)
-    if HitboxEnabled and not UnderplayerEnabled then
-        for _, player in pairs(Players:GetPlayers()) do
-            if IsEnemy(player) and player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
-                local hrp = player.Character.HumanoidRootPart
-                local humanoid = player.Character:FindFirstChildOfClass("Humanoid")
-
-                if humanoid and humanoid.Health > 0 then
+    -- Hitbox (update a cada 0.1s)
+    if tick() - lastHitboxUpdate > 0.1 then
+        if HitboxEnabled and not UnderplayerEnabled then
+            for _, player in pairs(Players:GetPlayers()) do
+                if IsEnemy(player) and IsPlayerValid(player) then
+                    local char = player.Character
+                    local hrp = char:FindFirstChild("HumanoidRootPart")
+                    
                     hrp.Size = Vector3.new(HitboxSize, HitboxSize, HitboxSize)
                     hrp.Transparency = 0.7
                     hrp.BrickColor = BrickColor.new("Really red")
@@ -833,44 +823,34 @@ RunService.RenderStepped:Connect(function()
                 end
             end
         end
+        lastHitboxUpdate = tick()
     end
 
-    -- Loop do Underplayer (Apenas se ativado)
+    -- Underplayer
     if UnderplayerEnabled then
         for _, player in pairs(Players:GetPlayers()) do
-            if IsEnemy(player) and player.Character then
+            if IsEnemy(player) and IsPlayerValid(player) then
                 local char = player.Character
                 local hrp = char:FindFirstChild("HumanoidRootPart")
-                local humanoid = char:FindFirstChildOfClass("Humanoid")
 
-                if hrp and humanoid and humanoid.Health > 0 then
-                    hrp.Size = Vector3.new(20, 20, 20)
-                    hrp.Transparency = 0.6
-                    hrp.BrickColor = BrickColor.new("Cyan")
-                    hrp.Material = Enum.Material.ForceField
-                    hrp.CanCollide = false
-
-                    local lowerTorso = char:FindFirstChild("LowerTorso") or char:FindFirstChild("Torso")
-                    if lowerTorso then
-                        local rootJoint = hrp:FindFirstChild("RootJoint") or lowerTorso:FindFirstChild("RootJoint")
-                        if rootJoint then
-                            rootJoint.C0 = CFrame.new(0, -7, 0) * CFrame.Angles(-math.rad(90), 0, math.rad(180))
-                        end
-                    end
-                end
+                hrp.Size = Vector3.new(20, 20, 20)
+                hrp.Transparency = 0.6
+                hrp.BrickColor = BrickColor.new("Cyan")
+                hrp.Material = Enum.Material.ForceField
+                hrp.CanCollide = false
             end
         end
     end
 end)
 
--- Infinite Jump Request
+-- Infinite Jump
 UserInputService.JumpRequest:Connect(function()
     if InfJumpEnabled and LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid") then
         LocalPlayer.Character:FindFirstChildOfClass("Humanoid"):ChangeState(Enum.HumanoidStateType.Jumping)
     end
 end)
 
--- Silent Aim Input
+-- Silent Aim
 UserInputService.InputBegan:Connect(function(input, processed)
     if not SilentAimEnabled or processed then return end
     
@@ -900,7 +880,7 @@ UserInputService.InputBegan:Connect(function(input, processed)
     end
 end)
 
--- Atalhos de Teclado
+-- Hotkeys
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
     if gameProcessed then return end
 
@@ -917,15 +897,12 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
     end
 end)
 
--- Seleção inicial de aba
 Window:SelectTab(1)
 
 Fluent:Notify({
     Title = "Zyro hub",
-    Content = "Zyro Hub carregado com sucesso!",
-    Duration = 5
+    Content = "Carregado com sucesso!",
+    Duration = 3
 })
 
-print("[ZYRO HUB] Script carregado com sucesso!")
-print("[ZYRO HUB] Criador: gomes.wqq")
-print("[ZYRO HUB] Versão 2.0")
+print("[ZYRO HUB] Carregado!")
